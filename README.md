@@ -8,7 +8,7 @@ A production-ready machine learning system that predicts taxi fare amounts in Ne
 
 **Objective**: Use advanced feature engineering and ML models to significantly outperform this baseline by building a robust, monitored, and production-ready ML system.
 
-## 📊 Dataset
+## Dataset
 
 **Source**: Kaggle - NYC Taxi Fare Prediction  
 **Total Rows**: ~200k rows  
