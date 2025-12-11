@@ -2,13 +2,13 @@ import boto3
 import pandas as pd
 import io
 import math
-from sklearn.model_selection import train_test_split
+import pathlib
+from botocore.exceptions import NoCredentialsError
 
-BUCKET = "nyc-taxi-ml-ops"
-INPUT_KEY = "data/processed/train_200k.csv"
-
-OUTPUT_TRAIN = "data/processed/train_final.csv"
-OUTPUT_TEST = "data/processed/test_final.csv"
+BUCKET = "nyc-taxi-mlops-final-project"
+INPUT_KEY = "processed/full_dataset.csv"
+TRAIN_OUTPUT_KEY = "processed/train_dataset.csv"
+TEST_OUTPUT_KEY = "processed/test_dataset.csv"
 
 
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -63,37 +63,79 @@ def clean_data(df):
     return df
 
 
+def save_df(df, s3_client, bucket, key, is_s3):
+    """Helper to save dataframe to S3 or Local"""
+    if is_s3:
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+        s3_client.put_object(Bucket=bucket, Key=key,
+                             Body=csv_buffer.getvalue().encode("utf-8"))
+        print(f"Uploaded: s3://{bucket}/{key}")
+    else:
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        local_path = repo_root / "data" / key
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(local_path, index=False)
+        print(f"Saved locally: {local_path}")
+
+
 def main():
     s3 = boto3.client("s3")
 
-    print("Downloading 200k dataset from S3...")
-    obj = s3.get_object(Bucket=BUCKET, Key=INPUT_KEY)
-    df = pd.read_csv(io.BytesIO(obj["Body"].read()))
+    # Try S3 first; if credentials are missing, fall back to a local dataset
+    use_s3 = True
+    print("Downloading dataset...")
+    try:
+        obj = s3.get_object(Bucket=BUCKET, Key=INPUT_KEY)
+        df = pd.read_csv(io.BytesIO(obj["Body"].read()))
+    except NoCredentialsError:
+        print("AWS credentials not found. Loading local dataset instead.")
+        use_s3 = False
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        local_path = repo_root / "data" / INPUT_KEY
+        if local_path.exists():
+            df = pd.read_csv(local_path)
+            print(f"Loaded local dataset: {local_path}")
+        else:
+            raise RuntimeError(
+                f"No AWS credentials and local dataset not found at {local_path}.")
+    except Exception as e:
+        print("Failed to download from S3:", e)
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        local_path = repo_root / "data" / INPUT_KEY
+        if local_path.exists():
+            print("Falling back to local dataset.")
+            df = pd.read_csv(local_path)
+            use_s3 = False
+        else:
+            raise
 
     print("Starting preprocessing...")
+    
+    # 1. Feature Engineering (converts datetime)
     df = add_features(df)
+    
+    # 2. Cleaning (removes invalid rows)
     df = clean_data(df)
 
-    print("Final cleaned shape:", df.shape)
+    # 3. Sort by date (Ascending)
+    df = df.sort_values(by="pickup_datetime", ascending=True)
 
-    # Split
-    train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
+    # 4. Split into Train (800) and Test (200)
+    # We take the first 1000 rows total.
+    # If the clean dataset is smaller than 1000, this will just take what is available.
+    
+    train_df = df.iloc[:800]
+    test_df = df.iloc[800:1000]
 
-    # Upload train
-    train_buf = io.StringIO()
-    train_df.to_csv(train_buf, index=False)
-    s3.put_object(Bucket=BUCKET, Key=OUTPUT_TRAIN,
-                  Body=train_buf.getvalue().encode("utf-8"))
+    print(f"Train shape: {train_df.shape}")
+    print(f"Test shape: {test_df.shape}")
 
-    # Upload test
-    test_buf = io.StringIO()
-    test_df.to_csv(test_buf, index=False)
-    s3.put_object(Bucket=BUCKET, Key=OUTPUT_TEST,
-                  Body=test_buf.getvalue().encode("utf-8"))
-
-    print("Uploaded:")
-    print(" →", f"s3://{BUCKET}/{OUTPUT_TRAIN}")
-    print(" →", f"s3://{BUCKET}/{OUTPUT_TEST}")
+    # Save Train
+    save_df(train_df, s3, BUCKET, TRAIN_OUTPUT_KEY, use_s3)
+    
+    # Save Test
+    save_df(test_df, s3, BUCKET, TEST_OUTPUT_KEY, use_s3)
 
 
 if __name__ == "__main__":
